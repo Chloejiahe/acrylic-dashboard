@@ -62,28 +62,29 @@ default_segment = segment_list[0] if segment_list else None
 # =========================================================
 # 工具函数
 # =========================================================
-def options_with_all(values):
+def options_only(values):
     vals = sorted(pd.Series(values).dropna().astype(str).unique().tolist())
-    return [{"label": "全部", "value": "ALL"}] + [{"label": v, "value": v} for v in vals]
+    return [{"label": v, "value": v} for v in vals]
 
 
 def normalize_multi_value(v):
     if v is None:
-        return ["ALL"]
+        return []
     if isinstance(v, list):
         vals = [str(x) for x in v if x not in [None, ""]]
     else:
         vals = [str(v)]
-    vals = list(dict.fromkeys(vals))
-    return ["ALL"] if (not vals or "ALL" in vals) else vals
+    return list(dict.fromkeys(vals))
+
+
+def normalize_segment_value(v):
+    return normalize_multi_value(v)
 
 
 def sanitize_multi_selection(current_value, valid_values):
     current_value = normalize_multi_value(current_value)
-    if "ALL" in current_value:
-        return ["ALL"]
-    kept = [v for v in current_value if v in valid_values and v != "ALL"]
-    return kept if kept else ["ALL"]
+    kept = [v for v in current_value if v in valid_values]
+    return kept
 
 
 def pct_text(value):
@@ -110,16 +111,16 @@ def apply_global_filters(df, ink_mode, brand, price_level, asin):
     price_level = normalize_multi_value(price_level)
     asin = normalize_multi_value(asin)
 
-    if COL_INK and "ALL" not in ink_mode:
+    if COL_INK and ink_mode:
         dff = dff[dff[COL_INK].astype(str).isin(ink_mode)]
 
-    if "ALL" not in brand and "Brand" in dff.columns:
+    if brand and "Brand" in dff.columns:
         dff = dff[dff["Brand"].astype(str).isin(brand)]
 
-    if COL_PRICE and "ALL" not in price_level:
+    if COL_PRICE and price_level:
         dff = dff[dff[COL_PRICE].astype(str).isin(price_level)]
 
-    if "ALL" not in asin and "Asin" in dff.columns:
+    if asin and "Asin" in dff.columns:
         dff = dff[dff["Asin"].astype(str).isin(asin)]
 
     return dff
@@ -293,64 +294,82 @@ def build_attribute_matrix_tables(attr_long, segment_order):
 
 
 def build_segment_attribute_cards(attr_long, selected_segment):
-    if attr_long.empty or not selected_segment:
-        return dbc.Alert("请选择一个人群查看 attribute 细分占比。", color="light")
+    selected_segments = normalize_segment_value(selected_segment)
 
-    seg_df = attr_long[attr_long["primary_segment"].astype(str) == str(selected_segment)].copy()
-    if seg_df.empty:
-        return dbc.Alert("当前筛选条件下，该人群暂无 attribute 细分数据。", color="light")
+    if attr_long.empty or not selected_segments:
+        return dbc.Alert("请选择至少一个人群查看 attribute 细分占比。", color="light")
 
-    dim_order = seg_df["attribute_dimension"].dropna().astype(str).unique().tolist()
-    cards = []
+    all_children = []
 
-    for dim in dim_order:
-        dim_df = (
-            seg_df[seg_df["attribute_dimension"].astype(str) == str(dim)]
-            .sort_values(["pct", "label_count"], ascending=[False, False])
-            .copy()
-        )
+    for seg in selected_segments:
+        seg_df = attr_long[attr_long["primary_segment"].astype(str) == str(seg)].copy()
+        if seg_df.empty:
+            continue
 
-        rows = []
-        for _, row in dim_df.iterrows():
-            value = 0 if pd.isna(row["pct"]) else float(row["pct"])
-            label_text = str(row["attribute_label"])
+        dim_order = seg_df["attribute_dimension"].dropna().astype(str).unique().tolist()
+        cards = []
 
-            rows.append(
-                html.Div([
-                    html.Div(label_text, className="attribute-progress-label"),
+        for dim in dim_order:
+            dim_df = (
+                seg_df[seg_df["attribute_dimension"].astype(str) == str(dim)]
+                .sort_values(["pct", "label_count"], ascending=[False, False])
+                .copy()
+            )
+
+            rows = []
+            for _, row in dim_df.iterrows():
+                value = 0 if pd.isna(row["pct"]) else float(row["pct"])
+                label_text = str(row["attribute_label"])
+
+                rows.append(
                     html.Div([
-                        dbc.Progress(
-                            value=round(value * 100, 1),
-                            class_name="attribute-progress-bar",
-                            style={"height": "12px"}
-                        ),
-                        html.Span(pct_text(value), className="attribute-progress-value")
-                    ], className="attribute-progress-right")
-                ], className="attribute-progress-row")
+                        html.Div(label_text, className="attribute-progress-label"),
+                        html.Div([
+                            dbc.Progress(
+                                value=round(value * 100, 1),
+                                class_name="attribute-progress-bar",
+                                style={"height": "12px"}
+                            ),
+                            html.Span(pct_text(value), className="attribute-progress-value")
+                        ], className="attribute-progress-right")
+                    ], className="attribute-progress-row")
+                )
+
+            cards.append(
+                dbc.Col(
+                    dbc.Card(
+                        dbc.CardBody([
+                            html.H6(dim, className="matrix-dimension-title"),
+                            html.Div(rows)
+                        ]),
+                        className="segment-breakdown-card h-100"
+                    ),
+                    xs=12, lg=6, xxl=4,
+                    className="mb-3"
+                )
             )
 
-        cards.append(
-            dbc.Col(
-                dbc.Card(
-                    dbc.CardBody([
-                        html.H6(dim, className="matrix-dimension-title"),
-                        html.Div(rows)
-                    ]),
-                    className="segment-breakdown-card h-100"
-                ),
-                xs=12, lg=6, xxl=4,
-                className="mb-3"
-            )
+        all_children.append(
+            html.Div([
+                html.H5(f"人群：{seg}", className="mb-3"),
+                dbc.Row(cards, className="g-3")
+            ], className="mb-4")
         )
 
-    return dbc.Row(cards, className="g-3") if cards else dbc.Alert("当前筛选条件下，该人群暂无 attribute 细分数据。", color="light")
+    return all_children if all_children else dbc.Alert("当前筛选条件下，所选人群暂无 attribute 细分数据。", color="light")
 
 
 def get_analysis_frames(ink_mode, brand, price_level, asin, selected_segment, analysis_scope):
     base_reviews = apply_global_filters(review_all_df, ink_mode, brand, price_level, asin)
+    selected_segments = normalize_segment_value(selected_segment)
 
-    if analysis_scope == "segment" and selected_segment and "primary_segment" in base_reviews.columns:
-        analysis_reviews = base_reviews[base_reviews["primary_segment"].astype(str) == str(selected_segment)].copy()
+    if analysis_scope == "segment":
+        if selected_segments and "primary_segment" in base_reviews.columns:
+            analysis_reviews = base_reviews[
+                base_reviews["primary_segment"].astype(str).isin(selected_segments)
+            ].copy()
+        else:
+            analysis_reviews = base_reviews.iloc[0:0].copy()
     else:
         analysis_reviews = base_reviews.copy()
 
@@ -359,13 +378,16 @@ def get_analysis_frames(ink_mode, brand, price_level, asin, selected_segment, an
         valid_ids = set(analysis_reviews["review_id"].tolist())
         qdf = qdf[qdf["review_id"].isin(valid_ids)]
 
-    if analysis_scope == "segment" and selected_segment and "primary_segment" in qdf.columns:
-        qdf = qdf[qdf["primary_segment"].astype(str) == str(selected_segment)]
+    if analysis_scope == "segment" and selected_segments and "primary_segment" in qdf.columns:
+        qdf = qdf[qdf["primary_segment"].astype(str).isin(selected_segments)]
 
     bdf = bundle_df.copy()
     if not bdf.empty and "review_id" in bdf.columns and "review_id" in analysis_reviews.columns:
         valid_ids = set(analysis_reviews["review_id"].tolist())
         bdf = bdf[bdf["review_id"].isin(valid_ids)]
+
+    if analysis_scope == "segment" and selected_segments and not bdf.empty and "primary_segment" in bdf.columns:
+        bdf = bdf[bdf["primary_segment"].astype(str).isin(selected_segments)]
 
     return analysis_reviews, qdf, bdf
 
@@ -556,6 +578,20 @@ def build_quote_cards(qdf, selected_dim, sentiment_type):
     )
 
 
+def build_analysis_review_rows(analysis_reviews):
+    if analysis_reviews.empty:
+        return []
+
+    show_cols = [
+        "review_id", "Asin", "Brand", "Rating", COL_PRICE, COL_INK,
+        "primary_segment", "is_noise", "Content"
+    ]
+    show_cols = [c for c in show_cols if c and c in analysis_reviews.columns]
+
+    out = analysis_reviews[show_cols].copy().head(500)
+    return out.to_dict("records")
+
+
 def build_bundle_summary(bdf):
     cols = ["bundle_category", "mention_count", "avg_rating", "detail_text"]
     if bdf.empty or "bundle_category" not in bdf.columns:
@@ -678,7 +714,7 @@ app.layout = dbc.Container([
     dbc.Row([
         dbc.Col([
             html.H2("丙烯笔评论分群看板", className="fw-bold"),
-            html.P("上半部分保留人群分群；下半部分支持综合评论与分群后评论的句子级分析。", className="text-muted")
+            html.P("上半部分保留人群分群；下半部分支持综合评论与分群后评论的句子级分析。顶部四个筛选器和人群细节均支持多选。", className="text-muted")
         ], width=12)
     ], className="my-4"),
 
@@ -687,10 +723,11 @@ app.layout = dbc.Container([
             html.Label("出墨方式"),
             dcc.Dropdown(
                 id="ink-filter",
-                options=options_with_all(review_all_df[COL_INK]) if COL_INK else [{"label": "全部", "value": "ALL"}],
-                value=["ALL"],
+                options=options_only(review_all_df[COL_INK]) if COL_INK else [],
+                value=[],
                 multi=True,
-                clearable=False
+                clearable=True,
+                placeholder="全部"
             )
         ], width=3),
 
@@ -698,10 +735,11 @@ app.layout = dbc.Container([
             html.Label("Brand"),
             dcc.Dropdown(
                 id="brand-filter",
-                options=options_with_all(review_all_df["Brand"]) if "Brand" in review_all_df.columns else [{"label": "全部", "value": "ALL"}],
-                value=["ALL"],
+                options=options_only(review_all_df["Brand"]) if "Brand" in review_all_df.columns else [],
+                value=[],
                 multi=True,
-                clearable=False
+                clearable=True,
+                placeholder="全部"
             )
         ], width=3),
 
@@ -709,10 +747,11 @@ app.layout = dbc.Container([
             html.Label("Price Level"),
             dcc.Dropdown(
                 id="price-filter",
-                options=options_with_all(review_all_df[COL_PRICE]) if COL_PRICE else [{"label": "全部", "value": "ALL"}],
-                value=["ALL"],
+                options=options_only(review_all_df[COL_PRICE]) if COL_PRICE else [],
+                value=[],
                 multi=True,
-                clearable=False
+                clearable=True,
+                placeholder="全部"
             )
         ], width=3),
 
@@ -720,10 +759,11 @@ app.layout = dbc.Container([
             html.Label("Asin"),
             dcc.Dropdown(
                 id="asin-filter",
-                options=options_with_all(review_all_df["Asin"]) if "Asin" in review_all_df.columns else [{"label": "全部", "value": "ALL"}],
-                value=["ALL"],
+                options=options_only(review_all_df["Asin"]) if "Asin" in review_all_df.columns else [],
+                value=[],
                 multi=True,
-                clearable=False
+                clearable=True,
+                placeholder="全部"
             )
         ], width=3),
     ], className="mb-4"),
@@ -764,8 +804,10 @@ app.layout = dbc.Container([
                     dcc.Dropdown(
                         id="segment-detail-dropdown",
                         options=[{"label": x, "value": x} for x in segment_list],
-                        value=default_segment,
-                        clearable=False
+                        value=[default_segment] if default_segment else [],
+                        multi=True,
+                        clearable=True,
+                        placeholder="可多选人群"
                     )
                 ], width=4)
             ], className="mb-3"),
@@ -863,7 +905,32 @@ app.layout = dbc.Container([
 
             html.Div(id="root-cause-card", className="mb-3"),
             html.H5(id="quote-list-title", className="mb-3 fw-bold"),
-            html.Div(id="feature-quote-list")
+            html.Div(id="feature-quote-list", className="mb-4"),
+
+            html.H5(id="analysis-review-table-title", className="mb-3 fw-bold"),
+            dag.AgGrid(
+                id="analysis-review-table",
+                columnDefs=[
+                    {"field": "review_id", "headerName": "review_id"},
+                    {"field": "Asin", "headerName": "Asin"},
+                    {"field": "Brand", "headerName": "Brand"},
+                    {"field": "Rating", "headerName": "Rating"},
+                    {"field": "Price Level", "headerName": "Price Level"},
+                    {"field": "出墨方式", "headerName": "出墨方式"},
+                    {"field": "primary_segment", "headerName": "primary_segment"},
+                    {"field": "is_noise", "headerName": "is_noise"},
+                    {"field": "Content", "headerName": "Content", "wrapText": True, "autoHeight": True},
+                ],
+                rowData=[],
+                defaultColDef={
+                    "sortable": True,
+                    "filter": True,
+                    "resizable": True,
+                    "floatingFilter": True,
+                },
+                dashGridOptions={"pagination": True, "paginationPageSize": 15},
+                style={"height": "560px", "width": "100%"}
+            )
         ])
     ], className="mb-4"),
 
@@ -894,11 +961,11 @@ def update_brand_options(ink_mode, current_brand):
     dff = review_all_df.copy()
 
     ink_vals = normalize_multi_value(ink_mode)
-    if COL_INK and "ALL" not in ink_vals:
+    if COL_INK and ink_vals:
         dff = dff[dff[COL_INK].astype(str).isin(ink_vals)]
 
-    options = options_with_all(dff["Brand"]) if "Brand" in dff.columns else [{"label": "全部", "value": "ALL"}]
-    valid_values = [x["value"] for x in options if x["value"] != "ALL"]
+    options = options_only(dff["Brand"]) if "Brand" in dff.columns else []
+    valid_values = [x["value"] for x in options]
     value = sanitize_multi_selection(current_brand, valid_values)
     return options, value
 
@@ -915,20 +982,20 @@ def update_brand_options(ink_mode, current_brand):
 )
 def update_price_options(ink_mode, brand, current_price):
     if not COL_PRICE:
-        return [{"label": "全部", "value": "ALL"}], ["ALL"]
+        return [], []
 
     dff = review_all_df.copy()
 
     ink_vals = normalize_multi_value(ink_mode)
     brand_vals = normalize_multi_value(brand)
 
-    if COL_INK and "ALL" not in ink_vals:
+    if COL_INK and ink_vals:
         dff = dff[dff[COL_INK].astype(str).isin(ink_vals)]
-    if "ALL" not in brand_vals and "Brand" in dff.columns:
+    if brand_vals and "Brand" in dff.columns:
         dff = dff[dff["Brand"].astype(str).isin(brand_vals)]
 
-    options = options_with_all(dff[COL_PRICE])
-    valid_values = [x["value"] for x in options if x["value"] != "ALL"]
+    options = options_only(dff[COL_PRICE])
+    valid_values = [x["value"] for x in options]
     value = sanitize_multi_selection(current_price, valid_values)
     return options, value
 
@@ -951,15 +1018,15 @@ def update_asin_options(ink_mode, brand, price_level, current_asin):
     brand_vals = normalize_multi_value(brand)
     price_vals = normalize_multi_value(price_level)
 
-    if COL_INK and "ALL" not in ink_vals:
+    if COL_INK and ink_vals:
         dff = dff[dff[COL_INK].astype(str).isin(ink_vals)]
-    if "ALL" not in brand_vals and "Brand" in dff.columns:
+    if brand_vals and "Brand" in dff.columns:
         dff = dff[dff["Brand"].astype(str).isin(brand_vals)]
-    if COL_PRICE and "ALL" not in price_vals:
+    if COL_PRICE and price_vals:
         dff = dff[dff[COL_PRICE].astype(str).isin(price_vals)]
 
-    options = options_with_all(dff["Asin"]) if "Asin" in dff.columns else [{"label": "全部", "value": "ALL"}]
-    valid_values = [x["value"] for x in options if x["value"] != "ALL"]
+    options = options_only(dff["Asin"]) if "Asin" in dff.columns else []
+    valid_values = [x["value"] for x in options]
     value = sanitize_multi_selection(current_asin, valid_values)
     return options, value
 
@@ -982,10 +1049,12 @@ def update_segment_options(ink_mode, brand, price_level, asin, current_segment):
     options = [{"label": x, "value": x} for x in segs]
 
     if not options:
-        return [], None
+        return [], []
 
+    current_segments = normalize_segment_value(current_segment)
     valid_values = [x["value"] for x in options]
-    value = current_segment if current_segment in valid_values else valid_values[0]
+    kept = [x for x in current_segments if x in valid_values]
+    value = kept if kept else [valid_values[0]]
     return options, value
 
 
@@ -1009,6 +1078,7 @@ def update_segment_options(ink_mode, brand, price_level, asin, current_segment):
 )
 def update_segmentation_section(ink_mode, brand, price_level, asin, selected_segment):
     dff = apply_global_filters(review_df, ink_mode, brand, price_level, asin)
+    selected_segments = normalize_segment_value(selected_segment)
 
     review_count = len(dff)
     avg_rating = round(dff["Rating"].mean(), 2) if review_count > 0 and "Rating" in dff.columns else 0
@@ -1031,9 +1101,12 @@ def update_segmentation_section(ink_mode, brand, price_level, asin, selected_seg
     segment_order = seg_df["primary_segment"].tolist() if not seg_df.empty else []
 
     matrix_children = build_attribute_matrix_tables(attr_long, segment_order)
-    segment_breakdown_children = build_segment_attribute_cards(attr_long, selected_segment)
+    segment_breakdown_children = build_segment_attribute_cards(attr_long, selected_segments)
 
-    detail_df = dff[dff["primary_segment"].astype(str) == str(selected_segment)].copy() if selected_segment else dff.copy()
+    detail_df = (
+        dff[dff["primary_segment"].astype(str).isin(selected_segments)].copy()
+        if selected_segments else dff.copy()
+    )
 
     show_cols = [
         "review_id", "Asin", "Brand", "primary_segment",
@@ -1089,13 +1162,15 @@ def update_feature_dimension_options(ink_mode, brand, price_level, asin, selecte
 
 
 # =========================================================
-# 亮点/痛点分析
+# 亮点/痛点分析 + 全量评论表
 # =========================================================
 @callback(
     Output("feature-summary-bar", "figure"),
     Output("root-cause-card", "children"),
     Output("quote-list-title", "children"),
     Output("feature-quote-list", "children"),
+    Output("analysis-review-table-title", "children"),
+    Output("analysis-review-table", "rowData"),
     Input("ink-filter", "value"),
     Input("brand-filter", "value"),
     Input("price-filter", "value"),
@@ -1106,10 +1181,15 @@ def update_feature_dimension_options(ink_mode, brand, price_level, asin, selecte
     Input("feature-dimension-dropdown", "value"),
 )
 def update_feature_section(ink_mode, brand, price_level, asin, selected_segment, analysis_scope, sentiment_type, selected_dim):
-    _, qdf, _ = get_analysis_frames(ink_mode, brand, price_level, asin, selected_segment, analysis_scope)
+    analysis_reviews, qdf, _ = get_analysis_frames(ink_mode, brand, price_level, asin, selected_segment, analysis_scope)
     feature_overview = build_overall_feature_overview(qdf)
+    selected_segments = normalize_segment_value(selected_segment)
 
-    scope_text = "综合全部评论" if analysis_scope == "overall" else f"选中人群：{selected_segment}"
+    scope_text = (
+        "综合全部评论"
+        if analysis_scope == "overall"
+        else f"选中人群：{'、'.join(selected_segments) if selected_segments else '未选择'}"
+    )
     fig_title = f"各维度情感倾向分布与满意度趋势（{scope_text}）"
     feature_fig = build_feature_overview_chart(feature_overview, fig_title)
 
@@ -1126,7 +1206,10 @@ def update_feature_section(ink_mode, brand, price_level, asin, selected_segment,
     dim_text = selected_dim if selected_dim else "全部维度"
     quote_title = f"用户评价原声回溯（{dim_text}｜{label_text}｜{len(temp)}条）"
 
-    return feature_fig, root_card, quote_title, quote_list
+    review_table_title = f"当前分析范围内全部评论（{scope_text}｜最多展示500条｜当前{len(analysis_reviews)}条）"
+    review_rows = build_analysis_review_rows(analysis_reviews)
+
+    return feature_fig, root_card, quote_title, quote_list, review_table_title, review_rows
 
 
 # =========================================================
