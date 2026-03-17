@@ -13,6 +13,13 @@ except Exception:  # pragma: no cover
 
 
 # =========================================================
+# 配置
+# =========================================================
+ENABLE_POLARITY = False   # True = 计算 TextBlob 句子极性；False = 不算，速度更快
+SAVE_EXCEL = False        # True = 额外写出 xlsx；False = 只写 parquet/csv，速度更快
+
+
+# =========================================================
 # 路径
 # =========================================================
 BASE_DIR = Path(__file__).resolve().parent
@@ -42,27 +49,38 @@ def normalize_kw(kw):
     return kw.strip()
 
 
-def keyword_found(text, kw):
-    kw = normalize_kw(kw)
-    if not kw:
+def keyword_found_norm(text_norm, kw_norm):
+    if not kw_norm:
         return False
 
-    if " " in kw:
-        return kw in text
-    return bool(re.search(rf"(?<!\w){re.escape(kw)}(?!\w)", text))
+    if " " in kw_norm:
+        return kw_norm in text_norm
+
+    padded_text = f" {text_norm} "
+    padded_kw = f" {kw_norm} "
+    return padded_kw in padded_text
+
+
+def unique_keyword_hits_norm(text_norm, keywords_norm):
+    hits = []
+    seen = set()
+
+    for kw_norm in keywords_norm:
+        if not kw_norm:
+            continue
+        if kw_norm in seen:
+            continue
+        if keyword_found_norm(text_norm, kw_norm):
+            hits.append(kw_norm)
+            seen.add(kw_norm)
+
+    return hits
 
 
 def unique_keyword_hits(text, keywords):
-    hits = []
-    seen = set()
-    for kw in keywords:
-        kw_norm = normalize_kw(kw)
-        if not kw_norm:
-            continue
-        if keyword_found(text, kw_norm) and kw_norm not in seen:
-            hits.append(kw_norm)
-            seen.add(kw_norm)
-    return hits
+    text_norm = normalize_text(text)
+    keywords_norm = [normalize_kw(kw) for kw in keywords]
+    return unique_keyword_hits_norm(text_norm, keywords_norm)
 
 
 def make_keyword_hint(keywords, max_n=4):
@@ -97,6 +115,8 @@ def split_sentences(text):
 
 
 def get_sentence_polarity(sentence):
+    if not ENABLE_POLARITY:
+        return 0.0
     if not sentence:
         return 0.0
     if TextBlob is None:
@@ -113,6 +133,18 @@ def choose_analysis_text(row):
         if col in row and pd.notna(row[col]) and str(row[col]).strip():
             return str(row[col]).strip()
     return str(row.get("Content", "")).strip()
+
+
+def save_outputs(df_obj, base_name):
+    parquet_path = PROCESSED_DIR / f"{base_name}.parquet"
+    csv_path = PROCESSED_DIR / f"{base_name}.csv"
+    df_obj.to_parquet(parquet_path, index=False)
+    df_obj.to_csv(csv_path, index=False, encoding="utf-8-sig")
+
+    if SAVE_EXCEL:
+        excel_path = PROCESSED_DIR / f"{base_name}.xlsx"
+        df_obj.to_excel(excel_path, index=False)
+
 
 
 # =========================================================
@@ -466,25 +498,128 @@ ATTRIBUTE_RULES = {
   }
 }
 
+# =========================================================
+# bundle insight：句子级证据
+# =========================================================
+BUNDLE_PRODUCT_DIC = {
+    "纸质媒介 (Paper & Pads)": {
+        "黑卡纸/本": ["black paper", "black cardstock", "dark paper", "black notebook", "black pad"],
+        "绘本/写生本": ["sketchbook", "sketch pad", "drawing book", "art journal", "mixed media pad"],
+        "重磅马克笔纸": ["marker paper", "heavyweight paper", "smooth cardstock", "160gsm", "200gsm", "thick paper"],
+        "涂鸦板/卡片": ["flashcards", "index cards", "diy cards", "tags"],
+        "水彩纸/多媒体纸": ["watercolor paper", "textured paper", "cold press", "mixed media paper"],
+        "黑色便利贴": ["black sticky notes", "black post its", "dark sticky notes"]
+    },
+    "涂色与创作 (Coloring & Greeting)": {
+        "成人涂色书": ["coloring book", "adult coloring", "mandala book", "therapy coloring"],
+        "贺卡/信封": ["greeting cards", "envelopes", "invitations", "blank cards", "thank you cards"],
+        "明信片": ["postcard", "postcards", "mailing cards", "blank postcards", "postal cards"],
+        "空白标签": ["gift tags", "label tags", "price tags", "hanging tags"]
+    },
+    "勾线与细节 (Detailing & Outlining)": {
+        "极细勾线笔": ["fineliner", "micro tip", "0 5mm pen", "ultra fine pen", "detail pen", "outline pen"],
+        "铅笔/橡皮": ["graphite pencil", "pencil", "sketching pencil", "kneaded eraser", "rubber", "electric eraser"]
+    },
+    "表面保护 (Finishing & Protection)": {
+        "亮油/保护喷雾": ["varnish", "sealer", "glossy spray", "fixative", "top coat", "clear coat"],
+        "密封胶": ["sealant", "mod podge", "acrylic sealer", "glue sealer"],
+        "遮蔽胶带": ["masking tape", "washi tape", "painter s tape", "decorative tape"]
+    },
+    "辅助与创意 (Tools & Accessories)": {
+        "镂空模板": ["stencils", "drawing template", "alphabet stencil", "pattern stencil"],
+        "便携笔袋/盒": ["carrying case", "storage bag", "organizer pouch", "holder", "pen stand", "acrylic holder"],
+        "火漆/装饰": ["wax seal", "sealing wax", "stamps", "gold leaf"],
+        "调色/混色": ["mixing palette", "paint tray", "dotting tools", "blending sponge"],
+        "贴纸/胶水": ["stickers", "glue pen", "adhesive", "decals"]
+    }
+}
+
+# =========================================================
+# 预处理索引（加速）
+# =========================================================
+def dedupe_norm_keywords(keywords):
+    out = []
+    seen = set()
+    for kw in keywords:
+        kw_norm = normalize_kw(kw)
+        if kw_norm and kw_norm not in seen:
+            out.append(kw_norm)
+            seen.add(kw_norm)
+    return out
+
+
+def prepare_segment_rules(segment_rules):
+    prepared = []
+    for i, rule in enumerate(segment_rules):
+        prepared.append({
+            "segment": rule["segment"],
+            "priority": i,
+            "core_norm": dedupe_norm_keywords(rule["core"]),
+            "aux_norm": dedupe_norm_keywords(rule["aux"]),
+        })
+    return prepared
+
+
+def prepare_attribute_rules(attribute_rules):
+    prepared = {}
+    for dim_name, label_map in attribute_rules.items():
+        prepared[dim_name] = {}
+        for label, keywords in label_map.items():
+            prepared[dim_name][label] = dedupe_norm_keywords(keywords)
+    return prepared
+
+
+def prepare_feature_index(feature_dic):
+    feature_index = {}
+    for dim_name, tag_map in feature_dic.items():
+        neg_list = []
+        pos_list = []
+
+        for tag, keywords in tag_map.items():
+            norm_keywords = dedupe_norm_keywords(keywords)
+
+            if "负面" in tag or "不满" in tag:
+                neg_list.append((tag, norm_keywords))
+            elif "正面" in tag:
+                pos_list.append((tag, norm_keywords))
+
+        feature_index[dim_name] = {
+            "neg": neg_list,
+            "pos": pos_list
+        }
+    return feature_index
+
+
+def prepare_bundle_index(bundle_dic):
+    bundle_index = []
+    for big_cat, sub_dict in bundle_dic.items():
+        for sub_item, keywords in sub_dict.items():
+            norm_keywords = dedupe_norm_keywords(keywords)
+            bundle_index.append((big_cat, sub_item, norm_keywords))
+    return bundle_index
+
+
+PREPARED_SEGMENT_RULES = prepare_segment_rules(SEGMENT_RULES)
+PREPARED_ATTRIBUTE_RULES = prepare_attribute_rules(ATTRIBUTE_RULES)
+FEATURE_INDEX = prepare_feature_index(FEATURE_DIC)
+BUNDLE_INDEX = prepare_bundle_index(BUNDLE_PRODUCT_DIC)
+
 
 # =========================================================
 # 主分群判定
-# 放宽阈值：
-# - 只有 0 命中才视为 noise
-# - 其余全部进入分群，但给出 confidence
 # =========================================================
-def assign_primary_segment(text):
+def assign_primary_segment(text_norm):
     candidates = []
 
-    for priority, rule in enumerate(SEGMENT_RULES):
-        core_hits = unique_keyword_hits(text, rule["core"])
-        aux_hits = unique_keyword_hits(text, rule["aux"])
+    for rule in PREPARED_SEGMENT_RULES:
+        core_hits = unique_keyword_hits_norm(text_norm, rule["core_norm"])
+        aux_hits = unique_keyword_hits_norm(text_norm, rule["aux_norm"])
         total_hits = len(set(core_hits + aux_hits))
         score = len(core_hits) * 3 + len(aux_hits)
 
         candidates.append({
             "segment": rule["segment"],
-            "priority": priority,
+            "priority": rule["priority"],
             "core_hits": len(core_hits),
             "aux_hits": len(aux_hits),
             "total_hits": total_hits,
@@ -528,19 +663,18 @@ def assign_primary_segment(text):
         "is_noise": is_noise
     }
 
-
 # =========================================================
 # attribute 标签 + 每个维度的主标签 + 命中关键词提示
 # =========================================================
-def build_attribute_flags_and_top(text):
+def build_attribute_flags_and_top(text_norm):
     result = {}
 
-    for dim_name, label_map in ATTRIBUTE_RULES.items():
+    for dim_name, label_map in PREPARED_ATTRIBUTE_RULES.items():
         label_scores = {}
         label_hits_map = {}
 
-        for label, keywords in label_map.items():
-            hits = unique_keyword_hits(text, keywords)
+        for label, keywords_norm in label_map.items():
+            hits = unique_keyword_hits_norm(text_norm, keywords_norm)
             label_scores[label] = len(hits)
             label_hits_map[label] = hits
             result[f"ATTR__{dim_name}__{label}"] = 1 if len(hits) > 0 else 0
@@ -552,7 +686,8 @@ def build_attribute_flags_and_top(text):
             top_score = valid_scores[top_label]
             top_hits = label_hits_map[top_label]
 
-            static_hint = make_keyword_hint(label_map[top_label], max_n=4)
+            raw_keywords = ATTRIBUTE_RULES[dim_name][top_label]
+            static_hint = make_keyword_hint(raw_keywords, max_n=4)
             matched_hint = ", ".join(top_hits[:4]) if top_hits else static_hint
             top_display = f"{top_label}（{static_hint}）"
         else:
@@ -590,89 +725,88 @@ def build_attribute_label_meta():
 
 # =========================================================
 # 亮点 / 痛点：句子级分析
-# - 借鉴原 streamlit：先拆句，再逐句匹配
-# - 每个句子可以命中多个维度
-# - 同一维度内：负面优先于正面，避免 "not good" 之类冲突
-# - reviews_segmented 里仍保留评论级 POS__/NEG__ 标记
-# - feature_quotes 改为句子级原声
 # =========================================================
 def build_feature_flags_and_quotes(row):
     flags = {}
     quote_rows = []
 
-    raw_text = row["analysis_text_raw"]
+    raw_text = row.analysis_text_raw
     sentences = split_sentences(raw_text)
 
-    dim_pos_hit = {dim: 0 for dim in FEATURE_DIC.keys()}
-    dim_neg_hit = {dim: 0 for dim in FEATURE_DIC.keys()}
+    dim_pos_hit = {dim: 0 for dim in FEATURE_INDEX.keys()}
+    dim_neg_hit = {dim: 0 for dim in FEATURE_INDEX.keys()}
 
     for sent_idx, sentence in enumerate(sentences, start=1):
         sent_norm = normalize_text(sentence)
         if not sent_norm:
             continue
 
-        sent_pol = get_sentence_polarity(sentence)
+        sent_pol = None
 
-        for dim_name, tag_map in FEATURE_DIC.items():
-            neg_tags = {k: v for k, v in tag_map.items() if ("负面" in k or "不满" in k)}
-            pos_tags = {k: v for k, v in tag_map.items() if "正面" in k}
-
+        for dim_name, dim_rules in FEATURE_INDEX.items():
             neg_found_this_dim = False
 
-            for tag, keywords in neg_tags.items():
-                hits = unique_keyword_hits(sent_norm, keywords)
+            for tag, keywords_norm in dim_rules["neg"]:
+                hits = unique_keyword_hits_norm(sent_norm, keywords_norm)
                 if not hits:
                     continue
 
+                if sent_pol is None:
+                    sent_pol = get_sentence_polarity(sentence)
+
                 neg_found_this_dim = True
                 dim_neg_hit[dim_name] = 1
+
                 quote_rows.append({
-                    "review_id": row["review_id"],
-                    "sentence_id": f"{row['review_id']}_{sent_idx}",
+                    "review_id": row.review_id,
+                    "sentence_id": f"{row.review_id}_{sent_idx}",
                     "sentence_index": sent_idx,
-                    "primary_segment": row["primary_segment"],
-                    "Asin": row.get("Asin", ""),
-                    "Brand": row.get("Brand", ""),
-                    "Nation": row.get("Nation", ""),
-                    "Rating": row.get("Rating", np.nan),
+                    "primary_segment": row.primary_segment,
+                    "Asin": getattr(row, "Asin", ""),
+                    "Brand": getattr(row, "Brand", ""),
+                    "Nation": getattr(row, "Nation", ""),
+                    "Rating": getattr(row, "Rating", np.nan),
                     "sentence_polarity": round(sent_pol, 4),
                     "sentiment_type": "negative",
                     "feature_dimension": dim_name,
                     "feature_tag": tag,
                     "matched_keywords": " | ".join(hits[:8]),
                     "Sentence": sentence,
-                    "Content": row.get("Content", "")
+                    "Content": getattr(row, "Content", "")
                 })
 
-            # 同一维度下若这一句已经命中负面，不再给同句同维度记正面
             if neg_found_this_dim:
                 continue
 
-            for tag, keywords in pos_tags.items():
-                hits = unique_keyword_hits(sent_norm, keywords)
+            for tag, keywords_norm in dim_rules["pos"]:
+                hits = unique_keyword_hits_norm(sent_norm, keywords_norm)
                 if not hits:
                     continue
 
+                if sent_pol is None:
+                    sent_pol = get_sentence_polarity(sentence)
+
                 dim_pos_hit[dim_name] = 1
+
                 quote_rows.append({
-                    "review_id": row["review_id"],
-                    "sentence_id": f"{row['review_id']}_{sent_idx}",
+                    "review_id": row.review_id,
+                    "sentence_id": f"{row.review_id}_{sent_idx}",
                     "sentence_index": sent_idx,
-                    "primary_segment": row["primary_segment"],
-                    "Asin": row.get("Asin", ""),
-                    "Brand": row.get("Brand", ""),
-                    "Nation": row.get("Nation", ""),
-                    "Rating": row.get("Rating", np.nan),
+                    "primary_segment": row.primary_segment,
+                    "Asin": getattr(row, "Asin", ""),
+                    "Brand": getattr(row, "Brand", ""),
+                    "Nation": getattr(row, "Nation", ""),
+                    "Rating": getattr(row, "Rating", np.nan),
                     "sentence_polarity": round(sent_pol, 4),
                     "sentiment_type": "positive",
                     "feature_dimension": dim_name,
                     "feature_tag": tag,
                     "matched_keywords": " | ".join(hits[:8]),
                     "Sentence": sentence,
-                    "Content": row.get("Content", "")
+                    "Content": getattr(row, "Content", "")
                 })
 
-    for dim_name in FEATURE_DIC.keys():
+    for dim_name in FEATURE_INDEX.keys():
         flags[f"NEG__{dim_name}"] = dim_neg_hit[dim_name]
         flags[f"POS__{dim_name}"] = dim_pos_hit[dim_name]
 
@@ -682,43 +816,9 @@ def build_feature_flags_and_quotes(row):
 # =========================================================
 # bundle insight：句子级证据
 # =========================================================
-BUNDLE_PRODUCT_DIC = {
-    "纸质媒介 (Paper & Pads)": {
-        "黑卡纸/本": ["black paper", "black cardstock", "dark paper", "black notebook", "black pad"],
-        "绘本/写生本": ["sketchbook", "sketch pad", "drawing book", "art journal", "mixed media pad"],
-        "重磅马克笔纸": ["marker paper", "heavyweight paper", "smooth cardstock", "160gsm", "200gsm", "thick paper"],
-        "涂鸦板/卡片": ["flashcards", "index cards", "diy cards", "tags"],
-        "水彩纸/多媒体纸": ["watercolor paper", "textured paper", "cold press", "mixed media paper"],
-        "黑色便利贴": ["black sticky notes", "black post its", "dark sticky notes"]
-    },
-    "涂色与创作 (Coloring & Greeting)": {
-        "成人涂色书": ["coloring book", "adult coloring", "mandala book", "therapy coloring"],
-        "贺卡/信封": ["greeting cards", "envelopes", "invitations", "blank cards", "thank you cards"],
-        "明信片": ["postcard", "postcards", "mailing cards", "blank postcards", "postal cards"],
-        "空白标签": ["gift tags", "label tags", "price tags", "hanging tags"]
-    },
-    "勾线与细节 (Detailing & Outlining)": {
-        "极细勾线笔": ["fineliner", "micro tip", "0 5mm pen", "ultra fine pen", "detail pen", "outline pen"],
-        "铅笔/橡皮": ["graphite pencil", "pencil", "sketching pencil", "kneaded eraser", "rubber", "electric eraser"]
-    },
-    "表面保护 (Finishing & Protection)": {
-        "亮油/保护喷雾": ["varnish", "sealer", "glossy spray", "fixative", "top coat", "clear coat"],
-        "密封胶": ["sealant", "mod podge", "acrylic sealer", "glue sealer"],
-        "遮蔽胶带": ["masking tape", "washi tape", "painter s tape", "decorative tape"]
-    },
-    "辅助与创意 (Tools & Accessories)": {
-        "镂空模板": ["stencils", "drawing template", "alphabet stencil", "pattern stencil"],
-        "便携笔袋/盒": ["carrying case", "storage bag", "organizer pouch", "holder", "pen stand", "acrylic holder"],
-        "火漆/装饰": ["wax seal", "sealing wax", "stamps", "gold leaf"],
-        "调色/混色": ["mixing palette", "paint tray", "dotting tools", "blending sponge"],
-        "贴纸/胶水": ["stickers", "glue pen", "adhesive", "decals"]
-    }
-}
-
-
 def build_bundle_quotes(row):
     quote_rows = []
-    raw_text = row["analysis_text_raw"]
+    raw_text = row.analysis_text_raw
     sentences = split_sentences(raw_text)
 
     for sent_idx, sentence in enumerate(sentences, start=1):
@@ -726,28 +826,26 @@ def build_bundle_quotes(row):
         if not sent_norm:
             continue
 
-        for big_cat, sub_dict in BUNDLE_PRODUCT_DIC.items():
-            for sub_item, keywords in sub_dict.items():
-                hits = unique_keyword_hits(sent_norm, keywords)
-                if not hits:
-                    continue
+        for big_cat, sub_item, keywords_norm in BUNDLE_INDEX:
+            hits = unique_keyword_hits_norm(sent_norm, keywords_norm)
+            if not hits:
+                continue
 
-                quote_rows.append({
-                    "review_id": row["review_id"],
-                    "sentence_id": f"{row['review_id']}_{sent_idx}",
-                    "sentence_index": sent_idx,
-                    "bundle_category": big_cat,
-                    "bundle_sub_item": sub_item,
-                    "matched_keywords": " | ".join(hits[:8]),
-                    "Asin": row.get("Asin", ""),
-                    "Brand": row.get("Brand", ""),
-                    "Rating": row.get("Rating", np.nan),
-                    "Sentence": sentence,
-                    "Content": row.get("Content", "")
-                })
+            quote_rows.append({
+                "review_id": row.review_id,
+                "sentence_id": f"{row.review_id}_{sent_idx}",
+                "sentence_index": sent_idx,
+                "bundle_category": big_cat,
+                "bundle_sub_item": sub_item,
+                "matched_keywords": " | ".join(hits[:8]),
+                "Asin": getattr(row, "Asin", ""),
+                "Brand": getattr(row, "Brand", ""),
+                "Rating": getattr(row, "Rating", np.nan),
+                "Sentence": sentence,
+                "Content": getattr(row, "Content", "")
+            })
 
     return quote_rows
-
 
 # =========================================================
 # 读取数据
@@ -755,7 +853,7 @@ def build_bundle_quotes(row):
 if not RAW_FILE.exists():
     raise FileNotFoundError(f"找不到原始文件: {RAW_FILE}")
 
-print("开始运行 segmentation pipeline v3（句子级情感/原声）...")
+print("开始运行 segmentation pipeline（加速版）...")
 print("正在读取原始 Excel ...")
 
 df = pd.read_excel(RAW_FILE)
@@ -790,7 +888,7 @@ print("进行句子级亮点 / 痛点分析中（全量评论）...")
 feature_flag_rows = []
 quote_rows_all = []
 
-for _, row in df.iterrows():
+for row in df.itertuples(index=False):
     flags, q_rows = build_feature_flags_and_quotes(row)
     feature_flag_rows.append(flags)
     quote_rows_all.extend(q_rows)
@@ -812,7 +910,7 @@ if feature_quotes_df.empty:
 # =========================================================
 print("提取 Bundle Insight 证据中（全量评论）...")
 bundle_rows_all = []
-for _, row in df.iterrows():
+for row in df.itertuples(index=False):
     bundle_rows_all.extend(build_bundle_quotes(row))
 
 bundle_quotes_df = pd.DataFrame(bundle_rows_all)
@@ -841,6 +939,8 @@ attr_df = classified_df["content_lower"].apply(build_attribute_flags_and_top).ap
 classified_df = pd.concat([classified_df, attr_df], axis=1)
 
 attribute_label_meta = build_attribute_label_meta()
+print("写出 attribute_label_meta ...")
+save_outputs(attribute_label_meta, "attribute_label_meta")
 
 
 # =========================================================
@@ -855,9 +955,7 @@ all_optional_keep = [c for c in ["出墨方式", "Price Level"] if c in df.colum
 reviews_all = df[all_base_keep + all_optional_keep].copy()
 
 print("写出 reviews_all ...")
-reviews_all.to_parquet(PROCESSED_DIR / "reviews_all.parquet", index=False)
-reviews_all.to_csv(PROCESSED_DIR / "reviews_all.csv", index=False, encoding="utf-8-sig")
-reviews_all.to_excel(PROCESSED_DIR / "reviews_all.xlsx", index=False)
+save_outputs(reviews_all, "reviews_all")
 
 
 # =========================================================
@@ -867,8 +965,7 @@ base_keep = [
     "review_id", "Asin", "Brand", "Nation", "Rating", "Content",
     "primary_segment", "segment_core_hits", "segment_aux_hits",
     "segment_total_hits", "segment_score", "segment_score_gap",
-    "segment_confidence",
-    "segment_core_evidence", "segment_aux_evidence"
+    "segment_confidence", "segment_core_evidence", "segment_aux_evidence"
 ]
 
 optional_keep = [c for c in ["出墨方式", "Price Level"] if c in classified_df.columns]
@@ -888,9 +985,7 @@ feature_keep = [c for c in classified_df.columns if c.startswith("NEG__") or c.s
 reviews_segmented = classified_df[base_keep + optional_keep + attr_keep + feature_keep].copy()
 
 print("写出 reviews_segmented ...")
-reviews_segmented.to_parquet(PROCESSED_DIR / "reviews_segmented.parquet", index=False)
-reviews_segmented.to_csv(PROCESSED_DIR / "reviews_segmented.csv", index=False, encoding="utf-8-sig")
-reviews_segmented.to_excel(PROCESSED_DIR / "reviews_segmented.xlsx", index=False)
+save_outputs(reviews_segmented, "reviews_segmented")
 
 
 # =========================================================
@@ -906,14 +1001,22 @@ segment_summary = (
     .sort_values("review_count", ascending=False)
 )
 segment_summary["avg_rating"] = segment_summary["avg_rating"].round(2)
-segment_summary.to_parquet(PROCESSED_DIR / "segment_summary.parquet", index=False)
-segment_summary.to_excel(PROCESSED_DIR / "segment_summary.xlsx", index=False)
+save_outputs(segment_summary, "segment_summary")
 
 
 # =========================================================
 # segment_profile_long
 # =========================================================
-attr_top_cols = [c for c in reviews_segmented.columns if c.startswith("ATTR_TOP__")]
+attr_top_cols = [
+    c for c in reviews_segmented.columns
+    if c.startswith("ATTR_TOP__")
+    and not c.startswith("ATTR_TOP_SCORE__")
+    and not c.startswith("ATTR_TOP_HINT__")
+    and not c.startswith("ATTR_TOP_MATCHED__")
+    and not c.startswith("ATTR_TOP_MATCHED_HINT__")
+    and not c.startswith("ATTR_TOP_DISPLAY__")
+]
+
 profile_rows = []
 
 for col in attr_top_cols:
@@ -940,10 +1043,14 @@ for col in attr_top_cols:
     out["pct_within_dimension"] = out["label_count"] / out["dimension_mentioned_count"]
     profile_rows.append(out)
 
-segment_profile_long = pd.concat(profile_rows, ignore_index=True) if profile_rows else pd.DataFrame(columns=[
-    "primary_segment", "attribute_label", "label_count", "dimension_mentioned_count",
-    "attribute_dimension", "pct_within_dimension"
-])
+segment_profile_long = (
+    pd.concat(profile_rows, ignore_index=True)
+    if profile_rows else
+    pd.DataFrame(columns=[
+        "primary_segment", "attribute_label", "label_count",
+        "dimension_mentioned_count", "attribute_dimension", "pct_within_dimension"
+    ])
+)
 
 if not segment_profile_long.empty:
     segment_profile_long = segment_profile_long.merge(
@@ -952,35 +1059,30 @@ if not segment_profile_long.empty:
         how="left"
     )
 
-segment_profile_long.to_parquet(PROCESSED_DIR / "segment_profile_long.parquet", index=False)
-segment_profile_long.to_excel(PROCESSED_DIR / "segment_profile_long.xlsx", index=False)
+save_outputs(segment_profile_long, "segment_profile_long")
 
 
 # =========================================================
 # feature_quotes（句子级）
 # =========================================================
 print("写出 feature_quotes（句子级原声）...")
-feature_quotes_df.to_parquet(PROCESSED_DIR / "feature_quotes.parquet", index=False)
-feature_quotes_df.to_csv(PROCESSED_DIR / "feature_quotes.csv", index=False, encoding="utf-8-sig")
-feature_quotes_df.to_excel(PROCESSED_DIR / "feature_quotes.xlsx", index=False)
+save_outputs(feature_quotes_df, "feature_quotes")
 
 
 # =========================================================
 # bundle_quotes
 # =========================================================
 print("写出 bundle_quotes ...")
-bundle_quotes_df.to_parquet(PROCESSED_DIR / "bundle_quotes.parquet", index=False)
-bundle_quotes_df.to_csv(PROCESSED_DIR / "bundle_quotes.csv", index=False, encoding="utf-8-sig")
-bundle_quotes_df.to_excel(PROCESSED_DIR / "bundle_quotes.xlsx", index=False)
+save_outputs(bundle_quotes_df, "bundle_quotes")
 
 
 # =========================================================
 # noise_reviews
 # =========================================================
 noise_keep = ["review_id", "Asin", "Brand", "Nation", "Rating", "Content"]
-noise_df[noise_keep].to_parquet(PROCESSED_DIR / "noise_reviews.parquet", index=False)
-noise_df[noise_keep].to_csv(PROCESSED_DIR / "noise_reviews.csv", index=False, encoding="utf-8-sig")
-noise_df[noise_keep].to_excel(PROCESSED_DIR / "noise_reviews.xlsx", index=False)
+noise_reviews = noise_df[noise_keep].copy()
+save_outputs(noise_reviews, "noise_reviews")
+
 
 print("处理完成。")
 print(f"总评论数: {len(df)}")
