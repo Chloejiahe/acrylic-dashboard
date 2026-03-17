@@ -1,15 +1,3 @@
-from pathlib import Path
-import os
-
-import pandas as pd
-import plotly.express as px
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
-import dash_bootstrap_components as dbc
-import dash_ag_grid as dag
-from dash import Dash, html, dcc, Input, Output, State, callback
-
-
 # =========================================================
 # 路径
 # =========================================================
@@ -17,11 +5,12 @@ BASE_DIR = Path(__file__).resolve().parent
 PROCESSED_DIR = BASE_DIR / "data" / "processed"
 
 review_path = PROCESSED_DIR / "reviews_segmented.parquet"
+review_all_path = PROCESSED_DIR / "reviews_all.parquet"
 quote_path = PROCESSED_DIR / "feature_quotes.parquet"
 bundle_path = PROCESSED_DIR / "bundle_quotes.parquet"
 attr_meta_path = PROCESSED_DIR / "attribute_label_meta.parquet"
 
-required_files = [review_path, quote_path]
+required_files = [review_path, review_all_path, quote_path]
 missing = [str(p.name) for p in required_files if not p.exists()]
 if missing:
     raise FileNotFoundError(f"缺少这些处理后文件：{missing}。请先运行 segmentation_pipeline.py")
@@ -30,7 +19,8 @@ if missing:
 # =========================================================
 # 读取数据
 # =========================================================
-review_df = pd.read_parquet(review_path)
+review_df = pd.read_parquet(review_path)          # 上半部分：可分群评论
+review_all_df = pd.read_parquet(review_all_path) # 顶部筛选器 + 下半部分：全量评论
 quote_df = pd.read_parquet(quote_path)
 bundle_df = pd.read_parquet(bundle_path) if bundle_path.exists() else pd.DataFrame()
 attr_meta_df = pd.read_parquet(attr_meta_path) if attr_meta_path.exists() else pd.DataFrame()
@@ -47,8 +37,8 @@ attr_top_cols = [
 neg_cols = [c for c in review_df.columns if c.startswith("NEG__")]
 pos_cols = [c for c in review_df.columns if c.startswith("POS__")]
 
-COL_INK = "出墨方式" if "出墨方式" in review_df.columns else None
-COL_PRICE = "Price Level" if "Price Level" in review_df.columns else None
+COL_INK = "出墨方式" if "出墨方式" in review_all_df.columns else None
+COL_PRICE = "Price Level" if "Price Level" in review_all_df.columns else None
 
 segment_list = (
     sorted(review_df["primary_segment"].dropna().astype(str).unique().tolist())
@@ -63,6 +53,25 @@ default_segment = segment_list[0] if segment_list else None
 def options_with_all(values):
     vals = sorted(pd.Series(values).dropna().astype(str).unique().tolist())
     return [{"label": "全部", "value": "ALL"}] + [{"label": v, "value": v} for v in vals]
+
+
+def normalize_multi_value(v):
+    if v is None:
+        return ["ALL"]
+    if isinstance(v, list):
+        vals = [str(x) for x in v if x not in [None, ""]]
+    else:
+        vals = [str(v)]
+    vals = list(dict.fromkeys(vals))
+    return ["ALL"] if (not vals or "ALL" in vals) else vals
+
+
+def sanitize_multi_selection(current_value, valid_values):
+    current_value = normalize_multi_value(current_value)
+    if "ALL" in current_value:
+        return ["ALL"]
+    kept = [v for v in current_value if v in valid_values and v != "ALL"]
+    return kept if kept else ["ALL"]
 
 
 def pct_text(value):
@@ -84,17 +93,22 @@ def star_text(value):
 def apply_global_filters(df, ink_mode, brand, price_level, asin):
     dff = df.copy()
 
-    if COL_INK and ink_mode != "ALL":
-        dff = dff[dff[COL_INK].astype(str) == str(ink_mode)]
+    ink_mode = normalize_multi_value(ink_mode)
+    brand = normalize_multi_value(brand)
+    price_level = normalize_multi_value(price_level)
+    asin = normalize_multi_value(asin)
 
-    if brand != "ALL" and "Brand" in dff.columns:
-        dff = dff[dff["Brand"].astype(str) == str(brand)]
+    if COL_INK and "ALL" not in ink_mode:
+        dff = dff[dff[COL_INK].astype(str).isin(ink_mode)]
 
-    if COL_PRICE and price_level != "ALL":
-        dff = dff[dff[COL_PRICE].astype(str) == str(price_level)]
+    if "ALL" not in brand and "Brand" in dff.columns:
+        dff = dff[dff["Brand"].astype(str).isin(brand)]
 
-    if asin != "ALL" and "Asin" in dff.columns:
-        dff = dff[dff["Asin"].astype(str) == str(asin)]
+    if COL_PRICE and "ALL" not in price_level:
+        dff = dff[dff[COL_PRICE].astype(str).isin(price_level)]
+
+    if "ALL" not in asin and "Asin" in dff.columns:
+        dff = dff[dff["Asin"].astype(str).isin(asin)]
 
     return dff
 
@@ -321,7 +335,7 @@ def build_segment_attribute_cards(attr_long, selected_segment):
 
 
 def get_analysis_frames(ink_mode, brand, price_level, asin, selected_segment, analysis_scope):
-    base_reviews = apply_global_filters(review_df, ink_mode, brand, price_level, asin)
+    base_reviews = apply_global_filters(review_all_df, ink_mode, brand, price_level, asin)
 
     if analysis_scope == "segment" and selected_segment and "primary_segment" in base_reviews.columns:
         analysis_reviews = base_reviews[base_reviews["primary_segment"].astype(str) == str(selected_segment)].copy()
@@ -661,8 +675,9 @@ app.layout = dbc.Container([
             html.Label("出墨方式"),
             dcc.Dropdown(
                 id="ink-filter",
-                options=options_with_all(review_df[COL_INK]) if COL_INK else [{"label": "全部", "value": "ALL"}],
-                value="ALL",
+                options=options_with_all(review_all_df[COL_INK]) if COL_INK else [{"label": "全部", "value": "ALL"}],
+                value=["ALL"],
+                multi=True,
                 clearable=False
             )
         ], width=3),
@@ -671,8 +686,9 @@ app.layout = dbc.Container([
             html.Label("Brand"),
             dcc.Dropdown(
                 id="brand-filter",
-                options=options_with_all(review_df["Brand"]) if "Brand" in review_df.columns else [{"label": "全部", "value": "ALL"}],
-                value="ALL",
+                options=options_with_all(review_all_df["Brand"]) if "Brand" in review_all_df.columns else [{"label": "全部", "value": "ALL"}],
+                value=["ALL"],
+                multi=True,
                 clearable=False
             )
         ], width=3),
@@ -681,8 +697,9 @@ app.layout = dbc.Container([
             html.Label("Price Level"),
             dcc.Dropdown(
                 id="price-filter",
-                options=options_with_all(review_df[COL_PRICE]) if COL_PRICE else [{"label": "全部", "value": "ALL"}],
-                value="ALL",
+                options=options_with_all(review_all_df[COL_PRICE]) if COL_PRICE else [{"label": "全部", "value": "ALL"}],
+                value=["ALL"],
+                multi=True,
                 clearable=False
             )
         ], width=3),
@@ -691,8 +708,9 @@ app.layout = dbc.Container([
             html.Label("Asin"),
             dcc.Dropdown(
                 id="asin-filter",
-                options=options_with_all(review_df["Asin"]) if "Asin" in review_df.columns else [{"label": "全部", "value": "ALL"}],
-                value="ALL",
+                options=options_with_all(review_all_df["Asin"]) if "Asin" in review_all_df.columns else [{"label": "全部", "value": "ALL"}],
+                value=["ALL"],
+                multi=True,
                 clearable=False
             )
         ], width=3),
@@ -701,7 +719,7 @@ app.layout = dbc.Container([
     dbc.Row([
         dbc.Col(dbc.Card(dbc.CardBody([
             html.H4(id="kpi-review-count"),
-            html.P("当前评论数", className="text-muted mb-0")
+            html.P("当前可分群评论数", className="text-muted mb-0")
         ])), width=3),
 
         dbc.Col(dbc.Card(dbc.CardBody([
@@ -716,7 +734,7 @@ app.layout = dbc.Container([
 
         dbc.Col(dbc.Card(dbc.CardBody([
             html.H4(id="kpi-brand-count"),
-            html.P("当前品牌数", className="text-muted mb-0")
+            html.P("当前可分群品牌数", className="text-muted mb-0")
         ])), width=3),
     ], className="mb-4"),
 
@@ -861,13 +879,15 @@ app.layout = dbc.Container([
     State("brand-filter", "value")
 )
 def update_brand_options(ink_mode, current_brand):
-    dff = review_df.copy()
-    if COL_INK and ink_mode != "ALL":
-        dff = dff[dff[COL_INK].astype(str) == str(ink_mode)]
+    dff = review_all_df.copy()
+
+    ink_vals = normalize_multi_value(ink_mode)
+    if COL_INK and "ALL" not in ink_vals:
+        dff = dff[dff[COL_INK].astype(str).isin(ink_vals)]
 
     options = options_with_all(dff["Brand"]) if "Brand" in dff.columns else [{"label": "全部", "value": "ALL"}]
-    valid_values = [x["value"] for x in options]
-    value = current_brand if current_brand in valid_values else "ALL"
+    valid_values = [x["value"] for x in options if x["value"] != "ALL"]
+    value = sanitize_multi_selection(current_brand, valid_values)
     return options, value
 
 
@@ -883,17 +903,21 @@ def update_brand_options(ink_mode, current_brand):
 )
 def update_price_options(ink_mode, brand, current_price):
     if not COL_PRICE:
-        return [{"label": "全部", "value": "ALL"}], "ALL"
+        return [{"label": "全部", "value": "ALL"}], ["ALL"]
 
-    dff = review_df.copy()
-    if COL_INK and ink_mode != "ALL":
-        dff = dff[dff[COL_INK].astype(str) == str(ink_mode)]
-    if brand != "ALL" and "Brand" in dff.columns:
-        dff = dff[dff["Brand"].astype(str) == str(brand)]
+    dff = review_all_df.copy()
+
+    ink_vals = normalize_multi_value(ink_mode)
+    brand_vals = normalize_multi_value(brand)
+
+    if COL_INK and "ALL" not in ink_vals:
+        dff = dff[dff[COL_INK].astype(str).isin(ink_vals)]
+    if "ALL" not in brand_vals and "Brand" in dff.columns:
+        dff = dff[dff["Brand"].astype(str).isin(brand_vals)]
 
     options = options_with_all(dff[COL_PRICE])
-    valid_values = [x["value"] for x in options]
-    value = current_price if current_price in valid_values else "ALL"
+    valid_values = [x["value"] for x in options if x["value"] != "ALL"]
+    value = sanitize_multi_selection(current_price, valid_values)
     return options, value
 
 
@@ -909,18 +933,22 @@ def update_price_options(ink_mode, brand, current_price):
     State("asin-filter", "value")
 )
 def update_asin_options(ink_mode, brand, price_level, current_asin):
-    dff = review_df.copy()
+    dff = review_all_df.copy()
 
-    if COL_INK and ink_mode != "ALL":
-        dff = dff[dff[COL_INK].astype(str) == str(ink_mode)]
-    if brand != "ALL" and "Brand" in dff.columns:
-        dff = dff[dff["Brand"].astype(str) == str(brand)]
-    if COL_PRICE and price_level != "ALL":
-        dff = dff[dff[COL_PRICE].astype(str) == str(price_level)]
+    ink_vals = normalize_multi_value(ink_mode)
+    brand_vals = normalize_multi_value(brand)
+    price_vals = normalize_multi_value(price_level)
+
+    if COL_INK and "ALL" not in ink_vals:
+        dff = dff[dff[COL_INK].astype(str).isin(ink_vals)]
+    if "ALL" not in brand_vals and "Brand" in dff.columns:
+        dff = dff[dff["Brand"].astype(str).isin(brand_vals)]
+    if COL_PRICE and "ALL" not in price_vals:
+        dff = dff[dff[COL_PRICE].astype(str).isin(price_vals)]
 
     options = options_with_all(dff["Asin"]) if "Asin" in dff.columns else [{"label": "全部", "value": "ALL"}]
-    valid_values = [x["value"] for x in options]
-    value = current_asin if current_asin in valid_values else "ALL"
+    valid_values = [x["value"] for x in options if x["value"] != "ALL"]
+    value = sanitize_multi_selection(current_asin, valid_values)
     return options, value
 
 
@@ -982,7 +1010,7 @@ def update_segmentation_section(ink_mode, brand, price_level, asin, selected_seg
         seg_df = pd.DataFrame(columns=["primary_segment", "count"])
 
     if seg_df.empty:
-        segment_fig = px.bar(title="主人群分布")
+        segment_fig = px.bar(title="主人群分布（当前筛选条件下暂无可分群评论）")
     else:
         segment_fig = px.bar(seg_df, x="primary_segment", y="count", title="主人群分布")
         segment_fig.update_layout(xaxis_title="", yaxis_title="评论数")
