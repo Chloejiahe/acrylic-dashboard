@@ -782,36 +782,21 @@ print("主分群中 ...")
 segment_records = df["content_lower"].apply(assign_primary_segment).apply(pd.Series)
 df = pd.concat([df, segment_records], axis=1)
 
-noise_df = df[df["is_noise"] == 1].copy()
-classified_df = df[df["is_noise"] == 0].copy()
-
-if classified_df.empty:
-    raise ValueError("当前规则下没有可分群评论，请检查规则或原始数据。")
-
 
 # =========================================================
-# 人群画像 attribute
+# 全量评论：句子级亮点 / 痛点 flags + 句子级原声
 # =========================================================
-print("生成 attribute 标签中 ...")
-attr_df = classified_df["content_lower"].apply(build_attribute_flags_and_top).apply(pd.Series)
-classified_df = pd.concat([classified_df, attr_df], axis=1)
-
-attribute_label_meta = build_attribute_label_meta()
-
-# =========================================================
-# 亮点 / 痛点 flags + 句子级原声
-# =========================================================
-print("进行句子级亮点 / 痛点分析中 ...")
+print("进行句子级亮点 / 痛点分析中（全量评论）...")
 feature_flag_rows = []
 quote_rows_all = []
 
-for _, row in classified_df.iterrows():
+for _, row in df.iterrows():
     flags, q_rows = build_feature_flags_and_quotes(row)
     feature_flag_rows.append(flags)
     quote_rows_all.extend(q_rows)
 
-feature_flags_df = pd.DataFrame(feature_flag_rows, index=classified_df.index)
-classified_df = pd.concat([classified_df, feature_flags_df], axis=1)
+feature_flags_df = pd.DataFrame(feature_flag_rows, index=df.index)
+df = pd.concat([df, feature_flags_df], axis=1)
 
 feature_quotes_df = pd.DataFrame(quote_rows_all)
 if feature_quotes_df.empty:
@@ -823,11 +808,11 @@ if feature_quotes_df.empty:
 
 
 # =========================================================
-# Bundle Insight：句子级证据
+# 全量评论：Bundle Insight 句子级证据
 # =========================================================
-print("提取 Bundle Insight 证据中 ...")
+print("提取 Bundle Insight 证据中（全量评论）...")
 bundle_rows_all = []
-for _, row in classified_df.iterrows():
+for _, row in df.iterrows():
     bundle_rows_all.extend(build_bundle_quotes(row))
 
 bundle_quotes_df = pd.DataFrame(bundle_rows_all)
@@ -836,6 +821,43 @@ if bundle_quotes_df.empty:
         "review_id", "sentence_id", "sentence_index", "bundle_category", "bundle_sub_item",
         "matched_keywords", "Asin", "Brand", "Rating", "Sentence", "Content"
     ])
+
+
+# =========================================================
+# 再拆 classified / noise
+# =========================================================
+noise_df = df[df["is_noise"] == 1].copy()
+classified_df = df[df["is_noise"] == 0].copy()
+
+if classified_df.empty:
+    raise ValueError("当前规则下没有可分群评论，请检查规则或原始数据。")
+
+
+# =========================================================
+# 人群画像 attribute（仍然只对 classified 做）
+# =========================================================
+print("生成 attribute 标签中 ...")
+attr_df = classified_df["content_lower"].apply(build_attribute_flags_and_top).apply(pd.Series)
+classified_df = pd.concat([classified_df, attr_df], axis=1)
+
+attribute_label_meta = build_attribute_label_meta()
+
+
+# =========================================================
+# reviews_all（全量评论基础表，给筛选器和下半部分句子分析用）
+# =========================================================
+all_base_keep = [
+    "review_id", "Asin", "Brand", "Nation", "Rating", "Content",
+    "primary_segment", "is_noise"
+]
+all_optional_keep = [c for c in ["出墨方式", "Price Level"] if c in df.columns]
+
+reviews_all = df[all_base_keep + all_optional_keep].copy()
+
+print("写出 reviews_all ...")
+reviews_all.to_parquet(PROCESSED_DIR / "reviews_all.parquet", index=False)
+reviews_all.to_csv(PROCESSED_DIR / "reviews_all.csv", index=False, encoding="utf-8-sig")
+reviews_all.to_excel(PROCESSED_DIR / "reviews_all.xlsx", index=False)
 
 
 # =========================================================
