@@ -648,37 +648,65 @@ def build_bundle_cards(bundle_summary, bdf):
         cat = row["bundle_category"]
         cat_df = bdf[bdf["bundle_category"].astype(str) == str(cat)].copy()
 
-        quote_items = []
+        if cat_df.empty:
+            continue
+
+        group_cols = [c for c in ["review_id", "Asin", "Brand", "Rating", "Content"] if c in cat_df.columns]
+        agg_map = {}
+
+        if "bundle_sub_item" in cat_df.columns:
+            agg_map["bundle_sub_item"] = lambda s: " | ".join(pd.Series(s).dropna().astype(str).unique().tolist())
+        if "matched_keywords" in cat_df.columns:
+            agg_map["matched_keywords"] = lambda s: " | ".join(pd.Series(s).dropna().astype(str).unique().tolist())
+        if "Sentence" in cat_df.columns:
+            agg_map["Sentence"] = lambda s: " || ".join(pd.Series(s).dropna().astype(str).unique().tolist())
+
+        if group_cols:
+            if agg_map:
+                cat_df = cat_df.groupby(group_cols, dropna=False, as_index=False).agg(agg_map)
+            else:
+                cat_df = cat_df.drop_duplicates(subset=group_cols).copy()
+
         sort_cols = [c for c in ["Rating", "Asin"] if c in cat_df.columns]
         if sort_cols:
             cat_df = cat_df.sort_values(sort_cols)
-        cat_df = cat_df.head(20)
 
+        quote_items = []
         for _, q in cat_df.iterrows():
             quote_text = ""
-            if "Sentence" in q and pd.notna(q["Sentence"]):
-                quote_text = str(q["Sentence"])
-            elif "Content" in q and pd.notna(q["Content"]):
+            if "Content" in q and pd.notna(q["Content"]) and str(q["Content"]).strip():
                 quote_text = str(q["Content"])
+            elif "Sentence" in q and pd.notna(q["Sentence"]):
+                quote_text = str(q["Sentence"])
 
             badge_list = []
             if "Asin" in q and pd.notna(q["Asin"]):
                 badge_list.append(dbc.Badge(str(q["Asin"]), color="warning", className="me-2"))
+            if "Brand" in q and pd.notna(q["Brand"]):
+                badge_list.append(dbc.Badge(str(q["Brand"]), color="light", text_color="dark", className="me-2"))
             if "bundle_sub_item" in q and pd.notna(q["bundle_sub_item"]):
                 badge_list.append(dbc.Badge(str(q["bundle_sub_item"]), color="secondary", className="me-2"))
             if "matched_keywords" in q and pd.notna(q["matched_keywords"]):
-                badge_list.append(dbc.Badge(str(q["matched_keywords"]), color="light", text_color="dark", className="me-2"))
+                badge_list.append(dbc.Badge(str(q["matched_keywords"]), color="info", className="me-2"))
 
             rating_block = (
                 html.Span(star_text(q["Rating"]), style={"color": "#f4b400", "marginLeft": "8px"})
                 if "Rating" in q and pd.notna(q["Rating"]) else ""
             )
 
+            sentence_hint = None
+            if "Sentence" in q and pd.notna(q["Sentence"]) and str(q["Sentence"]).strip():
+                sentence_hint = html.Div([
+                    html.Strong("命中句："),
+                    html.Span(str(q["Sentence"]))
+                ], className="text-muted mt-2", style={"fontSize": "13px", "lineHeight": "1.6"})
+
             quote_items.append(
                 dbc.Card(
                     dbc.CardBody([
                         html.Div(badge_list + [rating_block], className="mb-2"),
-                        html.Div(quote_text, style={"fontSize": "15px", "lineHeight": "1.7"})
+                        html.Div(quote_text, style={"fontSize": "15px", "lineHeight": "1.7"}),
+                        sentence_hint if sentence_hint else html.Div()
                     ]),
                     className="mb-2"
                 )
@@ -689,10 +717,11 @@ def build_bundle_cards(bundle_summary, bdf):
                 [
                     html.Div([
                         html.P([html.Strong("高频需求："), row["detail_text"]], className="mb-2"),
-                        html.P([html.Strong("用户满意度："), f'{row["avg_rating"]} ⭐'], className="mb-3"),
+                        html.P([html.Strong("用户满意度："), f'{row["avg_rating"]} ⭐'], className="mb-2"),
+                        html.P([html.Strong("评论数："), f'{len(cat_df)} 条'], className="mb-3"),
                         html.Div(
                             quote_items if quote_items else dbc.Alert("暂无原声。", color="light"),
-                            style={"maxHeight": "360px", "overflowY": "auto", "paddingRight": "8px"}
+                            style={"maxHeight": "520px", "overflowY": "auto", "paddingRight": "8px"}
                         )
                     ])
                 ],
@@ -714,7 +743,7 @@ app.layout = dbc.Container([
     dbc.Row([
         dbc.Col([
             html.H2("丙烯笔评论分群看板", className="fw-bold"),
-            html.P("上半部分保留人群分群；下半部分支持综合评论与分群后评论的句子级分析。顶部四个筛选器和人群细节均支持多选。", className="text-muted")
+            html.P("上半部分保留人群分群；下半部分支持综合评论与分群后评论的句子级分析。顶部四个筛选器和人群细节均支持多选。人群画像矩阵默认展示整体画像，不随顶部商品筛选变化。", className="text-muted")
         ], width=12)
     ], className="my-4"),
 
@@ -813,9 +842,11 @@ app.layout = dbc.Container([
             ], className="mb-3"),
 
             html.H5("人群画像矩阵（按 attribute 分表）", className="section-title"),
+            html.P("这里展示的是人群整体画像，用来看稳定的人群特征；不会因为顶部 ASIN / Brand / Price Level / 出墨方式 筛选而变化。", className="text-muted mb-2"),
             html.Div(id="attribute-matrix-container", className="mb-4"),
 
             html.H5("选中人群画像拆解（每个 attribute 单独展示）", className="section-title"),
+            html.P("这里同样展示该人群在全量样本中的画像结构，更适合做人群定义；商品筛选后的差异请看下方评论原声与 bundle 分析。", className="text-muted mb-2"),
             html.Div(id="segment-attribute-breakdown", className="mb-4"),
 
             html.H5("分群明细"),
@@ -905,32 +936,7 @@ app.layout = dbc.Container([
 
             html.Div(id="root-cause-card", className="mb-3"),
             html.H5(id="quote-list-title", className="mb-3 fw-bold"),
-            html.Div(id="feature-quote-list", className="mb-4"),
-
-            html.H5(id="analysis-review-table-title", className="mb-3 fw-bold"),
-            dag.AgGrid(
-                id="analysis-review-table",
-                columnDefs=[
-                    {"field": "review_id", "headerName": "review_id"},
-                    {"field": "Asin", "headerName": "Asin"},
-                    {"field": "Brand", "headerName": "Brand"},
-                    {"field": "Rating", "headerName": "Rating"},
-                    {"field": "Price Level", "headerName": "Price Level"},
-                    {"field": "出墨方式", "headerName": "出墨方式"},
-                    {"field": "primary_segment", "headerName": "primary_segment"},
-                    {"field": "is_noise", "headerName": "is_noise"},
-                    {"field": "Content", "headerName": "Content", "wrapText": True, "autoHeight": True},
-                ],
-                rowData=[],
-                defaultColDef={
-                    "sortable": True,
-                    "filter": True,
-                    "resizable": True,
-                    "floatingFilter": True,
-                },
-                dashGridOptions={"pagination": True, "paginationPageSize": 15},
-                style={"height": "560px", "width": "100%"}
-            )
+            html.Div(id="feature-quote-list", className="mb-4")
         ])
     ], className="mb-4"),
 
@@ -1097,11 +1103,9 @@ def update_segmentation_section(ink_mode, brand, price_level, asin, selected_seg
         segment_fig = px.bar(seg_df, x="primary_segment", y="count", title="主人群分布")
         segment_fig.update_layout(xaxis_title="", yaxis_title="评论数")
 
-    attr_long = build_attribute_long(dff)
-    segment_order = seg_df["primary_segment"].tolist() if not seg_df.empty else []
-
-    matrix_children = build_attribute_matrix_tables(attr_long, segment_order)
-    segment_breakdown_children = build_segment_attribute_cards(attr_long, selected_segments)
+    persona_attr_long = build_attribute_long(review_df)
+    matrix_children = build_attribute_matrix_tables(persona_attr_long, segment_list)
+    segment_breakdown_children = build_segment_attribute_cards(persona_attr_long, selected_segments)
 
     detail_df = (
         dff[dff["primary_segment"].astype(str).isin(selected_segments)].copy()
@@ -1169,8 +1173,6 @@ def update_feature_dimension_options(ink_mode, brand, price_level, asin, selecte
     Output("root-cause-card", "children"),
     Output("quote-list-title", "children"),
     Output("feature-quote-list", "children"),
-    Output("analysis-review-table-title", "children"),
-    Output("analysis-review-table", "rowData"),
     Input("ink-filter", "value"),
     Input("brand-filter", "value"),
     Input("price-filter", "value"),
@@ -1181,7 +1183,7 @@ def update_feature_dimension_options(ink_mode, brand, price_level, asin, selecte
     Input("feature-dimension-dropdown", "value"),
 )
 def update_feature_section(ink_mode, brand, price_level, asin, selected_segment, analysis_scope, sentiment_type, selected_dim):
-    analysis_reviews, qdf, _ = get_analysis_frames(ink_mode, brand, price_level, asin, selected_segment, analysis_scope)
+    _, qdf, _ = get_analysis_frames(ink_mode, brand, price_level, asin, selected_segment, analysis_scope)
     feature_overview = build_overall_feature_overview(qdf)
     selected_segments = normalize_segment_value(selected_segment)
 
@@ -1206,10 +1208,7 @@ def update_feature_section(ink_mode, brand, price_level, asin, selected_segment,
     dim_text = selected_dim if selected_dim else "全部维度"
     quote_title = f"用户评价原声回溯（{dim_text}｜{label_text}｜{len(temp)}条）"
 
-    review_table_title = f"当前分析范围内全部评论（{scope_text}｜最多展示500条｜当前{len(analysis_reviews)}条）"
-    review_rows = build_analysis_review_rows(analysis_reviews)
-
-    return feature_fig, root_card, quote_title, quote_list, review_table_title, review_rows
+    return feature_fig, root_card, quote_title, quote_list
 
 
 # =========================================================
